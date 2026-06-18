@@ -2064,7 +2064,6 @@ void ManageSellPosition(double open,double sl,double tp,double volume,double atr
    double newSL=SellManagedStop(open,sl,ask,atr);
 
    ModifyPositionStop(newSL,sl,tp,false);
-
    TryPartialClose(profitDistance,atr,volume);
 }
 
