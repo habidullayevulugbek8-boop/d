@@ -1839,6 +1839,88 @@ bool SellSignal()
    return trend && momentum && breakout && smartMoney && rsiOK && diOK && HTFTrendSell() && AIAllowSell() && DirectionalAIScore(false)>=MinAIScore;
 }
 
+bool TryPartialClose(double profitDistance,double atr,double volume)
+{
+   if(!UsePartialClose || profitDistance<PartialATR*atr)
+      return false;
+
+   double minVolume=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   if(volume<=minVolume)
+      return false;
+
+   string gv="MADINA_PARTIAL_"+IntegerToString((int)PositionGetInteger(POSITION_TICKET));
+   if(GlobalVariableCheck(gv))
+      return false;
+
+   double closeVolume=NormalizeDouble(volume*PartialPercent/100.0,2);
+   if(closeVolume>=minVolume && closeVolume<volume)
+   {
+      trade.PositionClosePartial(_Symbol,closeVolume);
+      GlobalVariableSet(gv,TimeCurrent());
+      return true;
+   }
+
+   return false;
+}
+
+double BuyManagedStop(double open,double sl,double bid,double atr)
+{
+   double newSL=sl;
+   double profitDistance=bid-open;
+
+   if(UseBreakEven && profitDistance>=BreakEvenATR*atr)
+      newSL=MathMax(newSL,open+BreakEvenLockATR*atr);
+
+   if(UseTrailing && profitDistance>=TrailStartATR*atr)
+   {
+      double trailSL=bid-TrailATR*atr;
+      if(sl==0 || trailSL>newSL+TrailStepATR*atr)
+         newSL=trailSL;
+   }
+
+   return newSL;
+}
+
+double SellManagedStop(double open,double sl,double ask,double atr)
+{
+   double newSL=sl;
+   double profitDistance=open-ask;
+
+   if(UseBreakEven && profitDistance>=BreakEvenATR*atr)
+      newSL=(newSL==0 ? open-BreakEvenLockATR*atr : MathMin(newSL,open-BreakEvenLockATR*atr));
+
+   if(UseTrailing && profitDistance>=TrailStartATR*atr)
+   {
+      double trailSL=ask+TrailATR*atr;
+      if(sl==0 || trailSL<newSL-TrailStepATR*atr)
+         newSL=trailSL;
+   }
+
+   return newSL;
+}
+
+void ManageBuyPosition(double open,double sl,double tp,double volume,double atr,double bid)
+{
+   double profitDistance=bid-open;
+   double newSL=BuyManagedStop(open,sl,bid,atr);
+
+   if(newSL>0 && (sl==0 || newSL>sl+_Point))
+      trade.PositionModify(_Symbol,NormalizePrice(newSL),tp);
+
+   TryPartialClose(profitDistance,atr,volume);
+}
+
+void ManageSellPosition(double open,double sl,double tp,double volume,double atr,double ask)
+{
+   double profitDistance=open-ask;
+   double newSL=SellManagedStop(open,sl,ask,atr);
+
+   if(newSL>0 && (sl==0 || newSL<sl-_Point))
+      trade.PositionModify(_Symbol,NormalizePrice(newSL),tp);
+
+   TryPartialClose(profitDistance,atr,volume);
+}
+
 void ManageOpenPosition()
 {
    if(!PositionSelect(_Symbol))
@@ -1856,75 +1938,149 @@ void ManageOpenPosition()
    double tp=PositionGetDouble(POSITION_TP);
    double volume=PositionGetDouble(POSITION_VOLUME);
    double atr=ATRValue[0];
-   double bid=BidPrice();
-   double ask=AskPrice();
-   double newSL=sl;
 
    if(type==POSITION_TYPE_BUY)
-   {
-      double profitDistance=bid-open;
-      if(UseBreakEven && profitDistance>=BreakEvenATR*atr)
-         newSL=MathMax(newSL,open+BreakEvenLockATR*atr);
-
-      if(UseTrailing && profitDistance>=TrailStartATR*atr)
-      {
-         double trailSL=bid-TrailATR*atr;
-         if(sl==0 || trailSL>newSL+TrailStepATR*atr)
-            newSL=trailSL;
-      }
-
-      if(newSL>0 && (sl==0 || newSL>sl+_Point))
-         trade.PositionModify(_Symbol,NormalizePrice(newSL),tp);
-
-      if(UsePartialClose && profitDistance>=PartialATR*atr && volume>SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN))
-      {
-         string gv="MADINA_PARTIAL_"+IntegerToString((int)PositionGetInteger(POSITION_TICKET));
-         if(!GlobalVariableCheck(gv))
-         {
-            double closeVolume=NormalizeDouble(volume*PartialPercent/100.0,2);
-            if(closeVolume>=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN) && closeVolume<volume)
-            {
-               trade.PositionClosePartial(_Symbol,closeVolume);
-               GlobalVariableSet(gv,TimeCurrent());
-            }
-         }
-      }
-   }
+      ManageBuyPosition(open,sl,tp,volume,atr,BidPrice());
    else if(type==POSITION_TYPE_SELL)
-   {
-      double profitDistance=open-ask;
-      if(UseBreakEven && profitDistance>=BreakEvenATR*atr)
-         newSL=(newSL==0 ? open-BreakEvenLockATR*atr : MathMin(newSL,open-BreakEvenLockATR*atr));
-
-      if(UseTrailing && profitDistance>=TrailStartATR*atr)
-      {
-         double trailSL=ask+TrailATR*atr;
-         if(sl==0 || trailSL<newSL-TrailStepATR*atr)
-            newSL=trailSL;
-      }
-
-      if(newSL>0 && (sl==0 || newSL<sl-_Point))
-         trade.PositionModify(_Symbol,NormalizePrice(newSL),tp);
-
-      if(UsePartialClose && profitDistance>=PartialATR*atr && volume>SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN))
-      {
-         string gv="MADINA_PARTIAL_"+IntegerToString((int)PositionGetInteger(POSITION_TICKET));
-         if(!GlobalVariableCheck(gv))
-         {
-            double closeVolume=NormalizeDouble(volume*PartialPercent/100.0,2);
-            if(closeVolume>=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN) && closeVolume<volume)
-            {
-               trade.PositionClosePartial(_Symbol,closeVolume);
-               GlobalVariableSet(gv,TimeCurrent());
-            }
-         }
-      }
-   }
+      ManageSellPosition(open,sl,tp,volume,atr,AskPrice());
 }
 
 //==============================================================
 //                      ASOSIY SIKL
 //==============================================================
+
+bool EntryPreconditionsOK()
+{
+   if(!AppRisk.CanTrade())
+   {
+      LastBlockReason="Risk limiti savdoni toxtatdi";
+      return false;
+   }
+
+   if(!SpreadOK())
+   {
+      LastBlockReason="Spred juda katta";
+      return false;
+   }
+
+   if(!SessionOK())
+   {
+      LastBlockReason="Sessiya yopiq";
+      return false;
+   }
+
+   if(!AppNews.CanTrade())
+   {
+      LastBlockReason="Yangilik filtri";
+      return false;
+   }
+
+   if(!ATRFilterOK())
+   {
+      LastBlockReason="ATR diapazondan tashqari";
+      return false;
+   }
+
+   if(!VolumeFilterOK())
+   {
+      LastBlockReason="Hajm yetarli emas";
+      return false;
+   }
+
+   if(!FlatFilterOK())
+   {
+      LastBlockReason="Flat bozor";
+      return false;
+   }
+
+   if(!EnoughBarsAfterTrade())
+   {
+      LastBlockReason="Savdolar oraligi kutilmoqda";
+      return false;
+   }
+
+   return true;
+}
+
+bool TradeLotOK(double stopDistance,double &lot)
+{
+   lot=AppRisk.Lot(stopDistance);
+   if(lot>0)
+      return true;
+
+   LastBlockReason="Lot hisoblash 0 chiqdi";
+   return false;
+}
+
+bool EntryAIScoreOK()
+{
+   double AIScore=MathMax(DirectionalAIScore(true),DirectionalAIScore(false));
+   if(AIScore>=MinAIScore)
+      return true;
+
+   LastBlockReason="AI umumiy baho past: "+DoubleToString(AIScore,1);
+   AppLogger.Info("AI filtri kirishni rad etdi. Baho = "+DoubleToString(AIScore,1));
+   return false;
+}
+
+bool ExecuteBuyEntry(double lot,double ask,double sl,double tp,datetime currentBar)
+{
+   if(trade.Buy(lot,_Symbol,ask,sl,tp,"Madina xarid ATR"))
+   {
+      LastTradeBar=currentBar;
+      LastBlockReason="Xarid ochildi";
+      Print("XARID MUVAFFAQIYAT lot=",DoubleToString(lot,2)," SL=",DoubleToString(sl,_Digits)," TP=",DoubleToString(tp,_Digits));
+      return true;
+   }
+
+   LastBlockReason="Xarid ijro xatosi: "+IntegerToString((int)trade.ResultRetcode());
+   Print("XARID XATO = ",trade.ResultRetcode());
+   return false;
+}
+
+bool ExecuteSellEntry(double lot,double bid,double sl,double tp,datetime currentBar)
+{
+   if(trade.Sell(lot,_Symbol,bid,sl,tp,"Madina sotish ATR"))
+   {
+      LastTradeBar=currentBar;
+      LastBlockReason="Sotish ochildi";
+      Print("SOTISH MUVAFFAQIYAT lot=",DoubleToString(lot,2)," SL=",DoubleToString(sl,_Digits)," TP=",DoubleToString(tp,_Digits));
+      return true;
+   }
+
+   LastBlockReason="Sotish ijro xatosi: "+IntegerToString((int)trade.ResultRetcode());
+   Print("SOTISH XATO = ",trade.ResultRetcode());
+   return false;
+}
+
+void EvaluateEntry(datetime currentBar)
+{
+   double Ask=AskPrice();
+   double Bid=BidPrice();
+   double ATR=ATRValue[0];
+
+   double slAtr=OptimizedStopLossATR();
+   double tpAtr=OptimizedTakeProfitATR();
+
+   double SLBuy=NormalizePrice(Ask-ATR*slAtr);
+   double TPBuy=NormalizePrice(Ask+ATR*tpAtr);
+   double SLSell=NormalizePrice(Bid+ATR*slAtr);
+   double TPSell=NormalizePrice(Bid-ATR*tpAtr);
+
+   double Lot=0.0;
+   if(!TradeLotOK(ATR*slAtr,Lot))
+      return;
+
+   if(!EntryAIScoreOK())
+      return;
+
+   LastBlockReason=EntryBlockReason(true)+" | "+EntryBlockReason(false);
+
+   if(AppEntry.Buy())
+      ExecuteBuyEntry(Lot,Ask,SLBuy,TPBuy,currentBar);
+   else if(AppEntry.Sell())
+      ExecuteSellEntry(Lot,Bid,SLSell,TPSell,currentBar);
+}
 
 void OnTick()
 {
@@ -1949,16 +2105,8 @@ void OnTick()
       return;
    }
 
-   if(!AppRisk.CanTrade() || !SpreadOK() || !SessionOK() || !AppNews.CanTrade() || !ATRFilterOK() || !VolumeFilterOK() || !FlatFilterOK() || !EnoughBarsAfterTrade())
+   if(!EntryPreconditionsOK())
    {
-      if(!AppRisk.CanTrade()) LastBlockReason="Risk limiti savdoni toxtatdi";
-      else if(!SpreadOK()) LastBlockReason="Spred juda katta";
-      else if(!SessionOK()) LastBlockReason="Sessiya yopiq";
-      else if(!AppNews.CanTrade()) LastBlockReason="Yangilik filtri";
-      else if(!ATRFilterOK()) LastBlockReason="ATR diapazondan tashqari";
-      else if(!VolumeFilterOK()) LastBlockReason="Hajm yetarli emas";
-      else if(!FlatFilterOK()) LastBlockReason="Flat bozor";
-      else LastBlockReason="Savdolar oraligi kutilmoqda";
       AppDashboard.Render();
       return;
    }
@@ -1967,66 +2115,7 @@ void OnTick()
    if(currentBar==LastTradeBar)
       return;
 
-   double Ask = AskPrice();
-   double Bid = BidPrice();
-   double ATR = ATRValue[0];
-
-   double slAtr=OptimizedStopLossATR();
-   double tpAtr=OptimizedTakeProfitATR();
-
-   double SLBuy  = NormalizePrice(Ask - ATR * slAtr);
-   double TPBuy  = NormalizePrice(Ask + ATR * tpAtr);
-   double SLSell = NormalizePrice(Bid + ATR * slAtr);
-   double TPSell = NormalizePrice(Bid - ATR * tpAtr);
-
-   double Lot = AppRisk.Lot(ATR * slAtr);
-   if(Lot<=0)
-   {
-      LastBlockReason="Lot hisoblash 0 chiqdi";
-      AppDashboard.Render();
-      return;
-   }
-
-   double AIScore = MathMax(DirectionalAIScore(true),DirectionalAIScore(false));
-
-   if(AIScore < MinAIScore)
-   {
-      LastBlockReason="AI umumiy baho past: "+DoubleToString(AIScore,1);
-      AppLogger.Info("AI filtri kirishni rad etdi. Baho = "+DoubleToString(AIScore,1));
-      AppDashboard.Render();
-      return;
-   }
-
-   LastBlockReason=EntryBlockReason(true)+" | "+EntryBlockReason(false);
-
-   if(AppEntry.Buy())
-   {
-      if(trade.Buy(Lot,_Symbol,Ask,SLBuy,TPBuy,"Madina xarid ATR"))
-      {
-         LastTradeBar=currentBar;
-         LastBlockReason="Xarid ochildi";
-         Print("XARID MUVAFFAQIYAT lot=",DoubleToString(Lot,2)," SL=",DoubleToString(SLBuy,_Digits)," TP=",DoubleToString(TPBuy,_Digits));
-      }
-      else
-      {
-         LastBlockReason="Xarid ijro xatosi: "+IntegerToString((int)trade.ResultRetcode());
-         Print("XARID XATO = ",trade.ResultRetcode());
-      }
-   }
-   else if(AppEntry.Sell())
-   {
-      if(trade.Sell(Lot,_Symbol,Bid,SLSell,TPSell,"Madina sotish ATR"))
-      {
-         LastTradeBar=currentBar;
-         LastBlockReason="Sotish ochildi";
-         Print("SOTISH MUVAFFAQIYAT lot=",DoubleToString(Lot,2)," SL=",DoubleToString(SLSell,_Digits)," TP=",DoubleToString(TPSell,_Digits));
-      }
-      else
-      {
-         LastBlockReason="Sotish ijro xatosi: "+IntegerToString((int)trade.ResultRetcode());
-         Print("SOTISH XATO = ",trade.ResultRetcode());
-      }
-   }
+   EvaluateEntry(currentBar);
 
    AppDashboard.Render();
 }
