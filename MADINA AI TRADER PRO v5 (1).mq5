@@ -58,6 +58,8 @@ input group "📊 ATR FILTRI"
 input int ATRPeriod           = 14;        // ATR davri
 input double StopLossATR      = 2.0;       // StopLoss ATR
 input double TakeProfitATR    = 3.0;       // TakeProfit ATR
+input bool   UseExceptionalTrendNoTP = true; // Juda kuchli trendda TP olib tashlash
+input double ExceptionalTrendScore   = 82.0; // TP olib tashlash uchun trend bahosi
 input double BreakEvenATR     = 1.0;       // BreakEven
 input double BreakEvenLockATR = 0.10;      // BreakEven foydani qulflash ATR
 input double TrailATR         = 1.5;       // Trailing Stop
@@ -200,6 +202,8 @@ bool BuySignal();
 bool SellSignal();
 string EntryBlockReason(bool buy);
 void ManageOpenPosition();
+double ExitPressureScore(bool buy,double profit_atr);
+double AdaptiveTrailMultiplier(bool buy,double profit_atr);
 void DrawHUD();
 void DrawPanel();
 
@@ -1866,15 +1870,25 @@ void ManageOpenPosition()
       if(UseBreakEven && profitDistance>=BreakEvenATR*atr)
          newSL=MathMax(newSL,open+BreakEvenLockATR*atr);
 
+      double profitATR=(atr>0.0 ? profitDistance/atr : 0.0);
+      double exitPressure=ExitPressureScore(true,profitATR);
+
       if(UseTrailing && profitDistance>=TrailStartATR*atr)
       {
-         double trailSL=bid-TrailATR*atr;
+         double trailSL=bid-AdaptiveTrailMultiplier(true,profitATR)*atr;
          if(sl==0 || trailSL>newSL+TrailStepATR*atr)
             newSL=trailSL;
       }
 
-      if(newSL>0 && (sl==0 || newSL>sl+_Point))
-         trade.PositionModify(_Symbol,NormalizePrice(newSL),tp);
+      if(exitPressure>=82.0 && profitDistance>0.35*atr)
+         newSL=MathMax(newSL,bid-0.30*atr);
+
+      double desiredTP=tp;
+      if(UseExceptionalTrendNoTP && GetTrendStrength()>=ExceptionalTrendScore && exitPressure<35.0)
+         desiredTP=0.0;
+
+      if(newSL>0 && (sl==0 || newSL>sl+_Point || desiredTP!=tp))
+         trade.PositionModify(_Symbol,NormalizePrice(newSL),desiredTP);
 
       if(UsePartialClose && profitDistance>=PartialATR*atr && volume>SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN))
       {
@@ -1896,15 +1910,25 @@ void ManageOpenPosition()
       if(UseBreakEven && profitDistance>=BreakEvenATR*atr)
          newSL=(newSL==0 ? open-BreakEvenLockATR*atr : MathMin(newSL,open-BreakEvenLockATR*atr));
 
+      double profitATR=(atr>0.0 ? profitDistance/atr : 0.0);
+      double exitPressure=ExitPressureScore(false,profitATR);
+
       if(UseTrailing && profitDistance>=TrailStartATR*atr)
       {
-         double trailSL=ask+TrailATR*atr;
+         double trailSL=ask+AdaptiveTrailMultiplier(false,profitATR)*atr;
          if(sl==0 || trailSL<newSL-TrailStepATR*atr)
             newSL=trailSL;
       }
 
-      if(newSL>0 && (sl==0 || newSL<sl-_Point))
-         trade.PositionModify(_Symbol,NormalizePrice(newSL),tp);
+      if(exitPressure>=82.0 && profitDistance>0.35*atr)
+         newSL=(newSL==0 ? ask+0.30*atr : MathMin(newSL,ask+0.30*atr));
+
+      double desiredTP=tp;
+      if(UseExceptionalTrendNoTP && GetTrendStrength()>=ExceptionalTrendScore && exitPressure<35.0)
+         desiredTP=0.0;
+
+      if(newSL>0 && (sl==0 || newSL<sl-_Point || desiredTP!=tp))
+         trade.PositionModify(_Symbol,NormalizePrice(newSL),desiredTP);
 
       if(UsePartialClose && profitDistance>=PartialATR*atr && volume>SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN))
       {
@@ -1920,6 +1944,71 @@ void ManageOpenPosition()
          }
       }
    }
+}
+
+
+//==============================================================
+//          INSTITUTIONAL EXIT / ADAPTIVE TRAILING ENGINE
+//==============================================================
+
+double ExitPressureScore(bool buy,double profit_atr)
+{
+   double score=0.0;
+
+   if(ArraySize(ADXValue)>1 && ADXValue[0]<ADXValue[1])
+      score+=15.0;
+
+   if(ArraySize(RSIValue)>0)
+   {
+      if(buy && RSIValue[0]>72.0) score+=12.0;
+      if(!buy && RSIValue[0]<28.0) score+=12.0;
+   }
+
+   if(buy)
+   {
+      if(BearishCHOCH()) score+=22.0;
+      if(BearishLiquiditySweep()) score+=18.0;
+      if(BearishFairValueGap()) score+=10.0;
+      if(BearishOrderBlock()) score+=10.0;
+      if(FastEMAValue[0]<SlowEMAValue[0]) score+=15.0;
+      if(MinusDI[0]>PlusDI[0]) score+=8.0;
+   }
+   else
+   {
+      if(BullishCHOCH()) score+=22.0;
+      if(BullishLiquiditySweep()) score+=18.0;
+      if(BullishFairValueGap()) score+=10.0;
+      if(BullishOrderBlock()) score+=10.0;
+      if(FastEMAValue[0]>SlowEMAValue[0]) score+=15.0;
+      if(PlusDI[0]>MinusDI[0]) score+=8.0;
+   }
+
+   if(profit_atr>=3.0)
+      score+=10.0;
+
+   return MathMin(score,100.0);
+}
+
+double AdaptiveTrailMultiplier(bool buy,double profit_atr)
+{
+   double continuation=GetTrendStrength();
+   double exitPressure=ExitPressureScore(buy,profit_atr);
+   double multiplier=TrailATR;
+
+   if(continuation>=80.0 && exitPressure<35.0)
+      multiplier*=1.65;
+   else if(continuation>=60.0 && exitPressure<45.0)
+      multiplier*=1.25;
+
+   if(exitPressure>=70.0)
+      multiplier*=0.45;
+   else if(exitPressure>=50.0)
+      multiplier*=0.70;
+
+   if(profit_atr>=4.0 && exitPressure>=45.0)
+      multiplier=MathMin(multiplier,0.85);
+
+   return MathMax(0.35,multiplier);
 }
 
 //==============================================================
@@ -1978,6 +2067,14 @@ void OnTick()
    double TPBuy  = NormalizePrice(Ask + ATR * tpAtr);
    double SLSell = NormalizePrice(Bid + ATR * slAtr);
    double TPSell = NormalizePrice(Bid - ATR * tpAtr);
+
+   if(UseExceptionalTrendNoTP && GetTrendStrength()>=ExceptionalTrendScore)
+   {
+      if(DirectionalAIScore(true)>DirectionalAIScore(false))
+         TPBuy=0.0;
+      else
+         TPSell=0.0;
+   }
 
    double Lot = AppRisk.Lot(ATR * slAtr);
    if(Lot<=0)
