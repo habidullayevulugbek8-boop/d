@@ -370,6 +370,41 @@ Execution speed must remain deterministic.
 
 ---
 
+
+## Current Refactoring Baseline
+
+The first professional architecture refactor keeps the existing single-file Expert Advisor layout intact for preset and deployment compatibility while separating the largest runtime responsibilities into smaller helper functions.
+
+Preserved behavior:
+
+- All existing Inputs remain unchanged.
+- The Magic Number remains unchanged.
+- Existing entry conditions, AI score thresholds, SMC checks, SL/TP formulas and order comments remain unchanged.
+- Existing break-even, trailing-stop and partial-close thresholds remain unchanged.
+
+Refactored responsibilities:
+
+- Position management now delegates buy stop management, sell stop management and partial-close execution to dedicated helpers.
+- Entry orchestration now separates pre-trade filters, lot validation, AI validation and market-order execution from the main `OnTick()` loop.
+- Duplicated partial-close code has been centralized so future exit-engine improvements can be made in one place.
+
+This is intentionally an architectural refactor only. It does not introduce a new strategy or modify trading decisions.
+
+
+## Performance Snapshot Layer
+
+The EA now maintains a lightweight runtime snapshot for the active symbol/timeframe. The snapshot caches bid, ask, spread, recent rates, indicator buffers, Smart Money scores and directional AI scores so the trading pipeline can reuse calculated state instead of repeatedly calling expensive terminal functions on every tick.
+
+Runtime rules:
+
+- Bid/ask/spread are refreshed every tick.
+- Rates and indicator buffers are refreshed on a new bar or first load.
+- Smart Money and directional AI calculations are cached per bar.
+- Dashboard labels are updated on a configurable interval and only changed when object properties actually differ.
+- Dashboard rows use deterministic spacing to prevent overlapping text and flickering in the visual tester.
+
+Trading intent remains unchanged: the cache is an execution-quality and performance layer, not a replacement strategy. High-confidence lot expansion is still bounded by `NormalizeLot()` and broker symbol limits to avoid invalid volume errors.
+
 # FUTURE MODULES
 
 News Filter
