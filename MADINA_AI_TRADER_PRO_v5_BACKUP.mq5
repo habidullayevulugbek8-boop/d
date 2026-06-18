@@ -29,6 +29,8 @@ input double AutoLotStep      = 1000.0;    // Har 1000$ uchun lot
 
 input double MinLot           = 0.01;      // Minimal lot
 input double MaxLot           = 50.0;      // Maksimal lot
+input double AggressiveLotBoost = 3.0;       // Kuchli signalda lot kuchaytirish
+input double HighConfidenceLot  = 85.0;      // Lot kuchaytirish AI chegarasi
 
 //==============================================================
 //                 TREND SOZLAMALARI
@@ -146,6 +148,7 @@ input bool ShowSignal       = true;        // Signal
 input bool ShowSession      = true;        // Sessiya
 input bool ShowNewsStatus   = true;        // Yangilik holati
 input bool ShowSMCStatus    = true;        // SMC holati
+input int  PanelUpdateSeconds = 2;           // Panel yangilanish oraligi (sekund)
 
 //==============================================================
 //               GLOBAL O'ZGARUVCHILAR
@@ -187,12 +190,37 @@ double RSIValue[];
 double PlusDI[];
 double MinusDI[];
 
+#define SNAPSHOT_BARS 120
+MqlRates MarketRates[];
+datetime LastIndicatorBar = 0;
+datetime LastDashboardUpdate = 0;
+string LastDashboardText = "";
+double CachedAsk = 0.0;
+double CachedBid = 0.0;
+double CachedSpreadPoints = 0.0;
+datetime CachedSMCBar = 0;
+double CachedSMCBuy = 0.0;
+double CachedSMCSell = 0.0;
+datetime CachedDirectionalBar = 0;
+double CachedDirectionalBuy = 0.0;
+double CachedDirectionalSell = 0.0;
+datetime LastMarketTrendCache = 0;
+int TrendGOLD = 0;
+int TrendSILVER = 0;
+int TrendEUR = 0;
+int TrendBTC = 0;
+int TrendOIL = 0;
+int TrendDXY = 0;
+int TrendSP500 = 0;
+int TrendNASDAQ = 0;
+
 //==============================================================
 //              MODUL PROTOTIPLARI
 //==============================================================
 
 bool RiskLimitsOK();
 double CalculateLot(double StopDistance);
+bool CopyIndicatorValues(int handle,int buffer,int start,int count,double &target[]);
 bool HTFTrendBuy();
 bool HTFTrendSell();
 bool NewsOK();
@@ -266,13 +294,29 @@ Dashboard AppDashboard;
 
 double AskPrice()
 {
+   if(CachedAsk>0.0)
+      return CachedAsk;
    return SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 }
 
 double BidPrice()
 {
+   if(CachedBid>0.0)
+      return CachedBid;
    return SymbolInfoDouble(_Symbol, SYMBOL_BID);
 }
+
+bool RatesAvailable(int shift)
+{
+   return (shift>=0 && ArraySize(MarketRates)>shift);
+}
+
+double RateOpen(int shift) { return (RatesAvailable(shift) ? MarketRates[shift].open : iOpen(_Symbol,_Period,shift)); }
+double RateHigh(int shift) { return (RatesAvailable(shift) ? MarketRates[shift].high : iHigh(_Symbol,_Period,shift)); }
+double RateLow(int shift) { return (RatesAvailable(shift) ? MarketRates[shift].low : iLow(_Symbol,_Period,shift)); }
+double RateClose(int shift) { return (RatesAvailable(shift) ? MarketRates[shift].close : iClose(_Symbol,_Period,shift)); }
+long RateVolume(int shift) { return (RatesAvailable(shift) ? MarketRates[shift].tick_volume : iVolume(_Symbol,_Period,shift)); }
+datetime CurrentBarTime() { return (RatesAvailable(0) ? MarketRates[0].time : iTime(_Symbol,_Period,0)); }
 
 //==============================================================
 //             Ochiq pozitsiyani tekshirish
@@ -295,7 +339,9 @@ bool SpreadOK()
    if(!UseSpreadFilter)
       return true;
 
-   double spread=(AskPrice()-BidPrice())/_Point;
+   double spread=CachedSpreadPoints;
+   if(spread<=0.0)
+      spread=(AskPrice()-BidPrice())/_Point;
 
    if(spread>MaxSpread)
       return false;
@@ -309,10 +355,19 @@ bool SpreadOK()
 
 double HighestHighFrom(int bars,int start)
 {
-   int index=iHighest(_Symbol,_Period,MODE_HIGH,bars,start);
-   if(index<0)
-      return 0.0;
+   double highest=0.0;
+   int available=ArraySize(MarketRates);
+   if(available>start)
+   {
+      int last=MathMin(start+bars,available);
+      for(int i=start;i<last;i++)
+         if(highest==0.0 || MarketRates[i].high>highest)
+            highest=MarketRates[i].high;
+      return highest;
+   }
 
+   int index=iHighest(_Symbol,_Period,MODE_HIGH,bars,start);
+   if(index<0) return 0.0;
    return iHigh(_Symbol,_Period,index);
 }
 
@@ -327,10 +382,19 @@ double HighestHigh(int bars)
 
 double LowestLowFrom(int bars,int start)
 {
-   int index=iLowest(_Symbol,_Period,MODE_LOW,bars,start);
-   if(index<0)
-      return 0.0;
+   double lowest=0.0;
+   int available=ArraySize(MarketRates);
+   if(available>start)
+   {
+      int last=MathMin(start+bars,available);
+      for(int i=start;i<last;i++)
+         if(lowest==0.0 || MarketRates[i].low<lowest)
+            lowest=MarketRates[i].low;
+      return lowest;
+   }
 
+   int index=iLowest(_Symbol,_Period,MODE_LOW,bars,start);
+   if(index<0) return 0.0;
    return iLow(_Symbol,_Period,index);
 }
 
@@ -440,6 +504,9 @@ if(UseAIDynamicLot)
    // AI REJIM
    //-----------------------------
 
+   if(score>=HighConfidenceLot)
+      lot*=AggressiveLotBoost;
+
    lot*=GetRiskMultiplier();
 
    lot*=DrawdownLotMultiplier();
@@ -461,6 +528,10 @@ if(UseAIDynamicLot)
    if(UseAutoLot)
    {
       double lot = Balance() / AutoLotStep * 0.01;
+
+      double aiScore=MathMax(DirectionalAIScore(true),DirectionalAIScore(false));
+      if(aiScore>=HighConfidenceLot)
+         lot*=AggressiveLotBoost;
 
       lot*=DrawdownLotMultiplier();
       return NormalizeLot(lot);
@@ -485,6 +556,13 @@ if(UseAIDynamicLot)
       double lot =
       RiskMoney /
       ((StopDistance/TickSize)*TickValue);
+
+      double aiScore=MathMax(DirectionalAIScore(true),DirectionalAIScore(false));
+      if(aiScore>=HighConfidenceLot)
+      {
+         double confidenceStep=(aiScore-HighConfidenceLot)/MathMax(1.0,100.0-HighConfidenceLot);
+         lot*=1.0+(AggressiveLotBoost-1.0)*MathMin(confidenceStep,1.0);
+      }
 
       return NormalizeLot(lot);
    }
@@ -865,14 +943,14 @@ int TrendDirection(string symbol)
    ArraySetAsSeries(ema20,true);
    ArraySetAsSeries(ema50,true);
 
-   if(CopyBuffer(EMA20Handle,0,0,1,ema20)<=0)
+   if(!CopyIndicatorValues(EMA20Handle,0,0,1,ema20))
    {
       IndicatorRelease(EMA20Handle);
       IndicatorRelease(EMA50Handle);
       return 0;
    }
 
-   if(CopyBuffer(EMA50Handle,0,0,1,ema50)<=0)
+   if(!CopyIndicatorValues(EMA50Handle,0,0,1,ema50))
    {
       IndicatorRelease(EMA20Handle);
       IndicatorRelease(EMA50Handle);
@@ -892,40 +970,45 @@ int TrendDirection(string symbol)
 }
 
 //==============================================================
+//          KESISHUV BOZOR TREND KESHI
+//==============================================================
+
+void RefreshMarketTrendCache()
+{
+   datetime h1Bar=iTime(_Symbol,PERIOD_H1,0);
+   if(h1Bar!=0 && h1Bar==LastMarketTrendCache)
+      return;
+
+   TrendGOLD=TrendDirection(GOLD);
+   TrendSILVER=TrendDirection(SILVER);
+   TrendEUR=TrendDirection(EUR);
+   TrendBTC=TrendDirection(BTC);
+   TrendOIL=TrendDirection(OIL);
+   TrendDXY=TrendDirection(DXY);
+   TrendSP500=TrendDirection(SP500);
+   TrendNASDAQ=TrendDirection(NASDAQ);
+   LastMarketTrendCache=h1Bar;
+}
+
+//==============================================================
 //          AI BOZOR BAHOSI
 //==============================================================
 
 int GetMarketScore()
 {
-
+   RefreshMarketTrendCache();
    int score=0;
 
-   if(TrendDirection(GOLD)==1)
-      score++;
-
-   if(TrendDirection(SILVER)==1)
-      score++;
-
-   if(TrendDirection(EUR)==1)
-      score++;
-
-   if(TrendDirection(BTC)==1)
-      score++;
-
-   if(TrendDirection(NASDAQ)==1)
-      score++;
-
-   if(TrendDirection(SP500)==1)
-      score++;
-
-   if(TrendDirection(OIL)==1)
-      score++;
-
-   if(TrendDirection(DXY)==-1)
-      score++;
+   if(TrendGOLD==1) score++;
+   if(TrendSILVER==1) score++;
+   if(TrendEUR==1) score++;
+   if(TrendBTC==1) score++;
+   if(TrendNASDAQ==1) score++;
+   if(TrendSP500==1) score++;
+   if(TrendOIL==1) score++;
+   if(TrendDXY==-1) score++;
 
    return score;
-
 }
 //==============================================================
 //          AI ISHONCH
@@ -1192,11 +1275,20 @@ void OnDeinit(const int reason)
    IndicatorRelease(FastEMA_M15_Handle);
    IndicatorRelease(SlowEMA_M15_Handle);
    Comment("");
+
+   for(int i=0;i<40;i++)
+      ObjectDelete(0,"MADINA_PANEL_"+IntegerToString(i));
 }
 
 //==============================================================
 //                 PROFESSIONAL FILTRLAR VA IJRO
 //==============================================================
+
+
+bool CopyIndicatorValues(int handle,int buffer,int start,int count,double &target[])
+{
+   return (CopyBuffer(handle,buffer,start,count,target)>0);
+}
 
 double NormalizePrice(double price)
 {
@@ -1205,18 +1297,36 @@ double NormalizePrice(double price)
 
 bool RefreshIndicators()
 {
-   if(CopyBuffer(FastEMAHandle,0,0,3,FastEMAValue)<=0) return false;
-   if(CopyBuffer(SlowEMAHandle,0,0,3,SlowEMAValue)<=0) return false;
-   if(CopyBuffer(TrendEMAHandle,0,0,3,TrendEMAValue)<=0) return false;
-   if(CopyBuffer(ATRHandle,0,0,2,ATRValue)<=0) return false;
-   if(CopyBuffer(ADXHandle,0,0,2,ADXValue)<=0) return false;
-   if(CopyBuffer(RSIHandle,0,0,2,RSIValue)<=0) return false;
-   if(CopyBuffer(ADXHandle,1,0,2,PlusDI)<=0) return false;
-   if(CopyBuffer(ADXHandle,2,0,2,MinusDI)<=0) return false;
-   if(CopyBuffer(FastEMA_H1_Handle,0,0,2,FastEMA_H1)<=0) return false;
-   if(CopyBuffer(SlowEMA_H1_Handle,0,0,2,SlowEMA_H1)<=0) return false;
-   if(CopyBuffer(FastEMA_M15_Handle,0,0,2,FastEMA_M15)<=0) return false;
-   if(CopyBuffer(SlowEMA_M15_Handle,0,0,2,SlowEMA_M15)<=0) return false;
+   CachedAsk=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   CachedBid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   CachedSpreadPoints=(CachedAsk-CachedBid)/_Point;
+
+   datetime currentBar=iTime(_Symbol,_Period,0);
+   if(currentBar==0)
+      return false;
+
+   bool newBar=(currentBar!=LastIndicatorBar);
+   if(!newBar && ArraySize(ATRValue)>0 && ArraySize(MarketRates)>0)
+      return true;
+
+   ArraySetAsSeries(MarketRates,true);
+   if(CopyRates(_Symbol,_Period,0,SNAPSHOT_BARS,MarketRates)<=0) return false;
+   if(!CopyIndicatorValues(FastEMAHandle,0,0,3,FastEMAValue)) return false;
+   if(!CopyIndicatorValues(SlowEMAHandle,0,0,3,SlowEMAValue)) return false;
+   if(!CopyIndicatorValues(TrendEMAHandle,0,0,3,TrendEMAValue)) return false;
+   if(!CopyIndicatorValues(ATRHandle,0,0,2,ATRValue)) return false;
+   if(!CopyIndicatorValues(ADXHandle,0,0,2,ADXValue)) return false;
+   if(!CopyIndicatorValues(RSIHandle,0,0,2,RSIValue)) return false;
+   if(!CopyIndicatorValues(ADXHandle,1,0,2,PlusDI)) return false;
+   if(!CopyIndicatorValues(ADXHandle,2,0,2,MinusDI)) return false;
+   if(!CopyIndicatorValues(FastEMA_H1_Handle,0,0,2,FastEMA_H1)) return false;
+   if(!CopyIndicatorValues(SlowEMA_H1_Handle,0,0,2,SlowEMA_H1)) return false;
+   if(!CopyIndicatorValues(FastEMA_M15_Handle,0,0,2,FastEMA_M15)) return false;
+   if(!CopyIndicatorValues(SlowEMA_M15_Handle,0,0,2,SlowEMA_M15)) return false;
+
+   LastIndicatorBar=currentBar;
+   CachedSMCBar=0;
+   CachedDirectionalBar=0;
    return true;
 }
 
@@ -1235,14 +1345,14 @@ bool VolumeFilterOK()
    if(!UseVolumeFilter)
       return true;
 
-   long currentVolume=iVolume(_Symbol,_Period,1);
+   long currentVolume=RateVolume(1);
    if(currentVolume<=0)
       return false;
 
    long total=0;
    int samples=10;
    for(int i=2;i<2+samples;i++)
-      total+=iVolume(_Symbol,_Period,i);
+      total+=RateVolume(i);
 
    if(total<=0)
       return true;
@@ -1450,104 +1560,104 @@ bool HTFTrendSell()
 
 bool BullishDisplacement(int shift=1)
 {
-   double body=MathAbs(iClose(_Symbol,_Period,shift)-iOpen(_Symbol,_Period,shift));
-   return (ATRValue[0]>0 && body>=ATRValue[0]*0.45 && iClose(_Symbol,_Period,shift)>iOpen(_Symbol,_Period,shift));
+   double body=MathAbs(RateClose(shift)-RateOpen(shift));
+   return (ATRValue[0]>0 && body>=ATRValue[0]*0.45 && RateClose(shift)>RateOpen(shift));
 }
 
 bool BearishDisplacement(int shift=1)
 {
-   double body=MathAbs(iClose(_Symbol,_Period,shift)-iOpen(_Symbol,_Period,shift));
-   return (ATRValue[0]>0 && body>=ATRValue[0]*0.45 && iClose(_Symbol,_Period,shift)<iOpen(_Symbol,_Period,shift));
+   double body=MathAbs(RateClose(shift)-RateOpen(shift));
+   return (ATRValue[0]>0 && body>=ATRValue[0]*0.45 && RateClose(shift)<RateOpen(shift));
 }
 
 bool BullishBOS()
 {
    double prevHigh=HighestHighFrom(StructureLookback,2);
-   return (prevHigh>0 && iClose(_Symbol,_Period,1)>prevHigh && BullishDisplacement(1));
+   return (prevHigh>0 && RateClose(1)>prevHigh && BullishDisplacement(1));
 }
 
 bool BearishBOS()
 {
    double prevLow=LowestLowFrom(StructureLookback,2);
-   return (prevLow>0 && iClose(_Symbol,_Period,1)<prevLow && BearishDisplacement(1));
+   return (prevLow>0 && RateClose(1)<prevLow && BearishDisplacement(1));
 }
 
 bool BullishCHOCH()
 {
    double prevHigh=HighestHighFrom(MathMax(5,StructureLookback/2),2);
    return ((FastEMAValue[1]<=SlowEMAValue[1] && FastEMAValue[0]>SlowEMAValue[0]) ||
-           (prevHigh>0 && iClose(_Symbol,_Period,1)>prevHigh && PlusDI[0]>MinusDI[0]));
+           (prevHigh>0 && RateClose(1)>prevHigh && PlusDI[0]>MinusDI[0]));
 }
 
 bool BearishCHOCH()
 {
    double prevLow=LowestLowFrom(MathMax(5,StructureLookback/2),2);
    return ((FastEMAValue[1]>=SlowEMAValue[1] && FastEMAValue[0]<SlowEMAValue[0]) ||
-           (prevLow>0 && iClose(_Symbol,_Period,1)<prevLow && MinusDI[0]>PlusDI[0]));
+           (prevLow>0 && RateClose(1)<prevLow && MinusDI[0]>PlusDI[0]));
 }
 
 bool BullishFairValueGap()
 {
-   return (iLow(_Symbol,_Period,1)>iHigh(_Symbol,_Period,3));
+   return (RateLow(1)>RateHigh(3));
 }
 
 bool BearishFairValueGap()
 {
-   return (iHigh(_Symbol,_Period,1)<iLow(_Symbol,_Period,3));
+   return (RateHigh(1)<RateLow(3));
 }
 
 bool BullishOrderBlock()
 {
-   return (iClose(_Symbol,_Period,2)<iOpen(_Symbol,_Period,2) && iClose(_Symbol,_Period,1)>iHigh(_Symbol,_Period,2));
+   return (RateClose(2)<RateOpen(2) && RateClose(1)>RateHigh(2));
 }
 
 bool BearishOrderBlock()
 {
-   return (iClose(_Symbol,_Period,2)>iOpen(_Symbol,_Period,2) && iClose(_Symbol,_Period,1)<iLow(_Symbol,_Period,2));
+   return (RateClose(2)>RateOpen(2) && RateClose(1)<RateLow(2));
 }
 
 bool BullishLiquiditySweep()
 {
    double prevLow=LowestLowFrom(StructureLookback,2);
-   return (prevLow>0 && iLow(_Symbol,_Period,1)<prevLow && iClose(_Symbol,_Period,1)>prevLow && BullishDisplacement(1));
+   return (prevLow>0 && RateLow(1)<prevLow && RateClose(1)>prevLow && BullishDisplacement(1));
 }
 
 bool BearishLiquiditySweep()
 {
    double prevHigh=HighestHighFrom(StructureLookback,2);
-   return (prevHigh>0 && iHigh(_Symbol,_Period,1)>prevHigh && iClose(_Symbol,_Period,1)<prevHigh && BearishDisplacement(1));
+   return (prevHigh>0 && RateHigh(1)>prevHigh && RateClose(1)<prevHigh && BearishDisplacement(1));
 }
 
 bool EqualHighs()
 {
    double tolerance=MathMax(ATRValue[0]*0.10,_Point*10);
-   return (MathAbs(iHigh(_Symbol,_Period,1)-iHigh(_Symbol,_Period,2))<=tolerance);
+   return (MathAbs(RateHigh(1)-RateHigh(2))<=tolerance);
 }
 
 bool EqualLows()
 {
    double tolerance=MathMax(ATRValue[0]*0.10,_Point*10);
-   return (MathAbs(iLow(_Symbol,_Period,1)-iLow(_Symbol,_Period,2))<=tolerance);
+   return (MathAbs(RateLow(1)-RateLow(2))<=tolerance);
 }
 
 bool BullishBreakerBlock()
 {
-   return (BearishOrderBlock() && iClose(_Symbol,_Period,1)>iHigh(_Symbol,_Period,2));
+   return (BearishOrderBlock() && RateClose(1)>RateHigh(2));
 }
 
 bool BearishBreakerBlock()
 {
-   return (BullishOrderBlock() && iClose(_Symbol,_Period,1)<iLow(_Symbol,_Period,2));
+   return (BullishOrderBlock() && RateClose(1)<RateLow(2));
 }
 
 bool BullishMitigationBlock()
 {
-   return (BullishOrderBlock() && iLow(_Symbol,_Period,1)<=iHigh(_Symbol,_Period,2) && iClose(_Symbol,_Period,1)>iOpen(_Symbol,_Period,1));
+   return (BullishOrderBlock() && RateLow(1)<=RateHigh(2) && RateClose(1)>RateOpen(1));
 }
 
 bool BearishMitigationBlock()
 {
-   return (BearishOrderBlock() && iHigh(_Symbol,_Period,1)>=iLow(_Symbol,_Period,2) && iClose(_Symbol,_Period,1)<iOpen(_Symbol,_Period,1));
+   return (BearishOrderBlock() && RateHigh(1)>=RateLow(2) && RateClose(1)<RateOpen(1));
 }
 
 double PremiumDiscountValue()
@@ -1558,7 +1668,7 @@ double PremiumDiscountValue()
    if(range<=0)
       return 50.0;
 
-   return (iClose(_Symbol,_Period,1)-low)*100.0/range;
+   return (RateClose(1)-low)*100.0/range;
 }
 
 bool DiscountZone()
@@ -1581,7 +1691,7 @@ bool KillZoneOK()
    return (london || newYork);
 }
 
-double SMCScore(bool buy)
+double CalculateSMCScore(bool buy)
 {
    double score=0.0;
 
@@ -1614,6 +1724,18 @@ double SMCScore(bool buy)
 
    if(KillZoneOK()) score+=10;
    return MathMin(score,100.0);
+}
+
+double SMCScore(bool buy)
+{
+   datetime bar=CurrentBarTime();
+   if(CachedSMCBar==bar)
+      return (buy ? CachedSMCBuy : CachedSMCSell);
+
+   CachedSMCBuy=CalculateSMCScore(true);
+   CachedSMCSell=CalculateSMCScore(false);
+   CachedSMCBar=bar;
+   return (buy ? CachedSMCBuy : CachedSMCSell);
 }
 
 string SMCText()
@@ -1751,7 +1873,7 @@ double OptimizedRiskMultiplier()
    return 1.0;
 }
 
-double DirectionalAIScore(bool buy)
+double CalculateDirectionalAIScore(bool buy)
 {
    double score=0.0;
 
@@ -1776,6 +1898,18 @@ double DirectionalAIScore(bool buy)
    return MathMin(score,100.0);
 }
 
+double DirectionalAIScore(bool buy)
+{
+   datetime bar=CurrentBarTime();
+   if(CachedDirectionalBar==bar)
+      return (buy ? CachedDirectionalBuy : CachedDirectionalSell);
+
+   CachedDirectionalBuy=CalculateDirectionalAIScore(true);
+   CachedDirectionalSell=CalculateDirectionalAIScore(false);
+   CachedDirectionalBar=bar;
+   return (buy ? CachedDirectionalBuy : CachedDirectionalSell);
+}
+
 string EntryBlockReason(bool buy)
 {
    double directional=DirectionalAIScore(buy);
@@ -1783,7 +1917,7 @@ string EntryBlockReason(bool buy)
 
    if(buy)
    {
-      double close1=iClose(_Symbol,_Period,1);
+      double close1=RateClose(1);
       double highBreak=HighestHighFrom(BreakoutBars,2);
       if(!(FastEMAValue[0]>SlowEMAValue[0] && SlowEMAValue[0]>TrendEMAValue[0])) return "Xarid trend mos emas";
       if(UseADXFilter && ADXValue[0]<MinADX) return "ADX kuchsiz";
@@ -1797,7 +1931,7 @@ string EntryBlockReason(bool buy)
    }
    else
    {
-      double close1=iClose(_Symbol,_Period,1);
+      double close1=RateClose(1);
       double lowBreak=LowestLowFrom(BreakoutBars,2);
       if(!(FastEMAValue[0]<SlowEMAValue[0] && SlowEMAValue[0]<TrendEMAValue[0])) return "Sotish trend mos emas";
       if(UseADXFilter && ADXValue[0]<MinADX) return "ADX kuchsiz";
@@ -1815,7 +1949,7 @@ string EntryBlockReason(bool buy)
 
 bool BuySignal()
 {
-   double close1=iClose(_Symbol,_Period,1);
+   double close1=RateClose(1);
    double highBreak=HighestHighFrom(BreakoutBars,2);
    bool trend=(FastEMAValue[0]>SlowEMAValue[0] && SlowEMAValue[0]>TrendEMAValue[0]);
    bool momentum=(!UseADXFilter || ADXValue[0]>=MinADX);
@@ -1828,7 +1962,7 @@ bool BuySignal()
 
 bool SellSignal()
 {
-   double close1=iClose(_Symbol,_Period,1);
+   double close1=RateClose(1);
    double lowBreak=LowestLowFrom(BreakoutBars,2);
    bool trend=(FastEMAValue[0]<SlowEMAValue[0] && SlowEMAValue[0]<TrendEMAValue[0]);
    bool momentum=(!UseADXFilter || ADXValue[0]>=MinADX);
@@ -1899,13 +2033,27 @@ double SellManagedStop(double open,double sl,double ask,double atr)
    return newSL;
 }
 
+
+bool ModifyPositionStop(double newSL,double oldSL,double tp,bool buy)
+{
+   if(newSL<=0)
+      return false;
+
+   if(buy && oldSL!=0 && newSL<=oldSL+_Point)
+      return false;
+
+   if(!buy && oldSL!=0 && newSL>=oldSL-_Point)
+      return false;
+
+   return trade.PositionModify(_Symbol,NormalizePrice(newSL),tp);
+}
+
 void ManageBuyPosition(double open,double sl,double tp,double volume,double atr,double bid)
 {
    double profitDistance=bid-open;
    double newSL=BuyManagedStop(open,sl,bid,atr);
 
-   if(newSL>0 && (sl==0 || newSL>sl+_Point))
-      trade.PositionModify(_Symbol,NormalizePrice(newSL),tp);
+   ModifyPositionStop(newSL,sl,tp,true);
 
    TryPartialClose(profitDistance,atr,volume);
 }
@@ -1915,9 +2063,7 @@ void ManageSellPosition(double open,double sl,double tp,double volume,double atr
    double profitDistance=open-ask;
    double newSL=SellManagedStop(open,sl,ask,atr);
 
-   if(newSL>0 && (sl==0 || newSL<sl-_Point))
-      trade.PositionModify(_Symbol,NormalizePrice(newSL),tp);
-
+   ModifyPositionStop(newSL,sl,tp,false);
    TryPartialClose(profitDistance,atr,volume);
 }
 
@@ -2111,7 +2257,7 @@ void OnTick()
       return;
    }
 
-   datetime currentBar=iTime(_Symbol,_Period,0);
+   datetime currentBar=CurrentBarTime();
    if(currentBar==LastTradeBar)
       return;
 
@@ -2326,26 +2472,27 @@ double GetMarketIntelligence()
    double score = 0;
 
    // Oltin uchun odatda zaif DXY ijobiy omil
-   if(TrendDirection(DXY)==-1)
+   RefreshMarketTrendCache();
+   if(TrendDXY==-1)
       score += 15;
 
    // Fond bozorining osishi
-   if(TrendDirection(SP500)==1)
+   if(TrendSP500==1)
       score += 10;
 
-   if(TrendDirection(NASDAQ)==1)
+   if(TrendNASDAQ==1)
       score += 10;
 
    // Kumushning osishi
-   if(TrendDirection(SILVER)==1)
+   if(TrendSILVER==1)
       score += 10;
 
    // Neftning osishi
-   if(TrendDirection(OIL)==1)
+   if(TrendOIL==1)
       score += 5;
 
    // BTCning osishi
-   if(TrendDirection(BTC)==1)
+   if(TrendBTC==1)
       score += 5;
 
    if(score>50)
@@ -2359,131 +2506,78 @@ double GetMarketIntelligence()
 
 void DrawHUD()
 {
-   if(!ShowHUD)
+   if(LastDashboardText=="COMMENT_CLEARED")
       return;
 
-   string txt;
-
-   txt =
-   "══════════════════════════════\n";
-
-   txt += " MADINA AI TRADER PRO X\n";
-
-   txt += "══════════════════════════════\n\n";
-
-   txt += "AI REJIM : " + ModeName() + "\n";
-
-   txt += "AI BAHO : " +
-       DoubleToString(GetAIScore(),1) + "%\n";
-
-txt += "XARID KUCHI : " +
-       DoubleToString(GetBuyPower(),1) + "%\n";
-
-txt += "SOTISH KUCHI : " +
-       DoubleToString(GetSellPower(),1) + "%\n";
-
-txt += "XARID EHTIMOLI : " +
-       DoubleToString(GetBuyProbability(),1) + "%\n";
-
-txt += "SOTISH EHTIMOLI : " +
-       DoubleToString(GetSellProbability(),1) + "%\n\n";
-
-   txt += "BALANS : " +
-          DoubleToString(Balance(),2) + "\n";
-
-   txt += "EQUITY : " +
-          DoubleToString(Equity(),2) + "\n";
-
-   txt += "FOYDA : " +
-          DoubleToString(Profit(),2) + "\n\n";
-
-   txt += "ADX : " +
-          DoubleToString(ADXValue[0],1) + "\n";
-
-   txt += "ATR : " +
-          DoubleToString(ATRValue[0],2) + "\n";
-
-   txt += "SPRED : " +
-          DoubleToString((AskPrice()-BidPrice())/_Point,1) + "\n";
-
-   txt += "KUNLIK FOYDA : " + DoubleToString(TodayClosedProfit(),2) + "\n";
-   txt += "DRAWDOWN : " + DoubleToString(DrawdownPercent(),2) + "%\n";
-   txt += "TREND : " + TrendText() + "\n";
-   txt += "SESSIYA : " + SessionText() + "\n";
-   txt += "YANGILIK : " + NewsText() + "\n";
-   txt += "SMC : " + SMCText() + "\n";
-   txt += "SABAB : " + LastBlockReason + "\n";
-   txt += "XARID XOTIRA : " + DoubleToString(PatternScore(true),1) + "%\n";
-   txt += "SOTISH XOTIRA : " + DoubleToString(PatternScore(false),1) + "%\n";
-   txt += "PROFIT FACTOR : " + DoubleToString(MemoryProfitFactor(),2) + "\n";
-   txt += "LOT MOSLASHUV : " + DoubleToString(DrawdownLotMultiplier()*OptimizedRiskMultiplier(),2) + "x\n";
-
-   txt += "\n";
-
-   txt += "FOYDA SERIYASI : " + IntegerToString(WinSeries) + "\n";
-
-   txt += "ZARAR SERIYASI : " + IntegerToString(LossSeries) + "\n";
-
-   txt += "\n";
-
-   txt += "HOLAT : TAYYOR";
-
-   Comment(txt);
+   Comment("");
+   LastDashboardText="COMMENT_CLEARED";
 }
-//==============================================================
-//               YOZUV YARATISH
-//==============================================================
 
-void CreateLabel(string name,
-                 string text,
-                 int x,
-                 int y,
-                 color clr,
-                 int size=10)
+void CreateLabel(string name,string text,int x,int y,color clr,int size=10)
 {
    if(ObjectFind(0,name)<0)
+   {
       ObjectCreate(0,name,OBJ_LABEL,0,0,0);
+      ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,name,OBJPROP_ANCHOR,ANCHOR_LEFT_UPPER);
+      ObjectSetString(0,name,OBJPROP_FONT,"Segoe UI");
+   }
 
-   ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
-   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
-   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
-
-   ObjectSetInteger(0,name,OBJPROP_COLOR,clr);
-   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,size);
-
-   ObjectSetString(0,name,OBJPROP_FONT,"Segoe UI");
-
-   ObjectSetString(0,name,OBJPROP_TEXT,text);
+   if(ObjectGetInteger(0,name,OBJPROP_XDISTANCE)!=x) ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
+   if(ObjectGetInteger(0,name,OBJPROP_YDISTANCE)!=y) ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
+   if(ObjectGetInteger(0,name,OBJPROP_COLOR)!=clr) ObjectSetInteger(0,name,OBJPROP_COLOR,clr);
+   if(ObjectGetInteger(0,name,OBJPROP_FONTSIZE)!=size) ObjectSetInteger(0,name,OBJPROP_FONTSIZE,size);
+   if(ObjectGetString(0,name,OBJPROP_TEXT)!=text) ObjectSetString(0,name,OBJPROP_TEXT,text);
 }
-//==============================================================
-//                AI PANELNI CHIZISH
-//==============================================================
+
+void DashboardRow(int &row,string label,string value,color clr=clrWhite)
+{
+   int y=15+(row*18);
+   CreateLabel("MADINA_PANEL_"+IntegerToString(row),label+" : "+value,15,y,clr,10);
+   row++;
+}
+
+bool DashboardUpdateDue()
+{
+   datetime now=TimeCurrent();
+   int interval=MathMax(1,PanelUpdateSeconds);
+   if(LastDashboardUpdate==0 || now-LastDashboardUpdate>=interval)
+   {
+      LastDashboardUpdate=now;
+      return true;
+   }
+   return false;
+}
 
 void DrawPanel()
 {
-   CreateLabel("T1","🤖 MADINA AI TRADER PRO",15,15,clrDeepSkyBlue,14);
-   CreateLabel("T2","AI REJIM : "+ModeName(),15,45,clrWhite);
-   CreateLabel("T3","AI BAHO : "+DoubleToString(GetAIScore(),1)+" %",15,65,clrLime);
-   CreateLabel("T4","XARID BAHO : "+DoubleToString(DirectionalAIScore(true),1)+" %",15,85,clrLime);
-   CreateLabel("T5","SOTISH BAHO : "+DoubleToString(DirectionalAIScore(false),1)+" %",15,105,clrTomato);
-   CreateLabel("T6","BALANS : "+DoubleToString(Balance(),2),15,130,clrWhite);
-   CreateLabel("T7","EQUITY : "+DoubleToString(Equity(),2),15,150,clrWhite);
-   CreateLabel("T8","SUZUVCHI FOYDA : "+DoubleToString(Profit(),2),15,170,clrYellow);
-   CreateLabel("T9","KUNLIK FOYDA : "+DoubleToString(TodayClosedProfit(),2),15,190,clrAqua);
-   CreateLabel("T10","DRAWDOWN : "+DoubleToString(DrawdownPercent(),2)+" %",15,210,clrOrange);
-   CreateLabel("T11","SPRED : "+DoubleToString((AskPrice()-BidPrice())/_Point,1),15,230,clrWhite);
-   CreateLabel("T12","ATR : "+DoubleToString(ATRValue[0],_Digits),15,250,clrWhite);
-   CreateLabel("T13","ADX : "+DoubleToString(ADXValue[0],1),15,270,clrWhite);
-   CreateLabel("T14","RSI : "+DoubleToString(RSIValue[0],1),15,290,clrWhite);
-   CreateLabel("T15","TREND : "+TrendText(),15,310,clrDeepSkyBlue);
-   CreateLabel("T16","SESSIYA : "+SessionText(),15,330,(SessionOK()?clrLime:clrTomato));
-   CreateLabel("T17","YANGILIK : "+NewsText(),15,350,(NewsOK()?clrLime:clrTomato));
-   CreateLabel("T18","SMC : "+SMCText(),15,370,clrGold);
-   CreateLabel("T19","XOTIRA WINRATE : "+DoubleToString(GetMemoryWinRate(),1)+" %",15,390,clrAqua);
-   CreateLabel("T20","OPT SL ATR : "+DoubleToString(OptimizedStopLossATR(),2),15,410,clrWhite);
-   CreateLabel("T21","OPT TP ATR : "+DoubleToString(OptimizedTakeProfitATR(),2),15,430,clrWhite);
-   CreateLabel("T22","PROFIT FACTOR : "+DoubleToString(MemoryProfitFactor(),2),15,450,clrAqua);
-   CreateLabel("T23","LOT MOSLASHUV : "+DoubleToString(DrawdownLotMultiplier()*OptimizedRiskMultiplier(),2)+" x",15,470,clrGold);
-   CreateLabel("T24","SAVDO SABABI : "+LastBlockReason,15,490,clrWhite);
-   CreateLabel("T25","SMC XARID/SOTISH : "+DoubleToString(SMCScore(true),0)+" / "+DoubleToString(SMCScore(false),0),15,510,clrGold);
+   if(!ShowHUD || !DashboardUpdateDue())
+      return;
+
+   int row=0;
+   DashboardRow(row,"🤖 MADINA AI TRADER PRO","",clrDeepSkyBlue);
+   DashboardRow(row,"AI REJIM",ModeName(),clrWhite);
+   DashboardRow(row,"AI BAHO",DoubleToString(GetAIScore(),1)+" %",clrLime);
+   DashboardRow(row,"XARID BAHO",DoubleToString(DirectionalAIScore(true),1)+" %",clrLime);
+   DashboardRow(row,"SOTISH BAHO",DoubleToString(DirectionalAIScore(false),1)+" %",clrTomato);
+   DashboardRow(row,"BALANS",DoubleToString(Balance(),2),clrWhite);
+   DashboardRow(row,"EQUITY",DoubleToString(Equity(),2),clrWhite);
+   DashboardRow(row,"SUZUVCHI FOYDA",DoubleToString(Profit(),2),clrYellow);
+   DashboardRow(row,"KUNLIK FOYDA",DoubleToString(TodayClosedProfit(),2),clrAqua);
+   DashboardRow(row,"DRAWDOWN",DoubleToString(DrawdownPercent(),2)+" %",clrOrange);
+   DashboardRow(row,"SPRED",DoubleToString(CachedSpreadPoints,1),clrWhite);
+   DashboardRow(row,"ATR",DoubleToString(ATRValue[0],_Digits),clrWhite);
+   DashboardRow(row,"ADX",DoubleToString(ADXValue[0],1),clrWhite);
+   DashboardRow(row,"RSI",DoubleToString(RSIValue[0],1),clrWhite);
+   DashboardRow(row,"TREND",TrendText(),clrDeepSkyBlue);
+   DashboardRow(row,"SESSIYA",SessionText(),(SessionOK()?clrLime:clrTomato));
+   DashboardRow(row,"YANGILIK",NewsText(),(NewsOK()?clrLime:clrTomato));
+   DashboardRow(row,"SMC",SMCText(),clrGold);
+   DashboardRow(row,"XOTIRA WINRATE",DoubleToString(GetMemoryWinRate(),1)+" %",clrAqua);
+   DashboardRow(row,"OPT SL ATR",DoubleToString(OptimizedStopLossATR(),2),clrWhite);
+   DashboardRow(row,"OPT TP ATR",DoubleToString(OptimizedTakeProfitATR(),2),clrWhite);
+   DashboardRow(row,"PROFIT FACTOR",DoubleToString(MemoryProfitFactor(),2),clrAqua);
+   DashboardRow(row,"LOT MOSLASHUV",DoubleToString(DrawdownLotMultiplier()*OptimizedRiskMultiplier(),2)+" x",clrGold);
+   DashboardRow(row,"SAVDO SABABI",LastBlockReason,clrWhite);
+   DashboardRow(row,"SMC XARID/SOTISH",DoubleToString(SMCScore(true),0)+" / "+DoubleToString(SMCScore(false),0),clrGold);
 }

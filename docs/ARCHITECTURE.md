@@ -390,6 +390,21 @@ Refactored responsibilities:
 
 This is intentionally an architectural refactor only. It does not introduce a new strategy or modify trading decisions.
 
+
+## Performance Snapshot Layer
+
+The EA now maintains a lightweight runtime snapshot for the active symbol/timeframe. The snapshot caches bid, ask, spread, recent rates, indicator buffers, Smart Money scores and directional AI scores so the trading pipeline can reuse calculated state instead of repeatedly calling expensive terminal functions on every tick.
+
+Runtime rules:
+
+- Bid/ask/spread are refreshed every tick.
+- Rates and indicator buffers are refreshed on a new bar or first load.
+- Smart Money and directional AI calculations are cached per bar.
+- Dashboard labels are updated on a configurable interval and only changed when object properties actually differ.
+- Dashboard rows use deterministic spacing to prevent overlapping text and flickering in the visual tester.
+
+Trading intent remains unchanged: the cache is an execution-quality and performance layer, not a replacement strategy. High-confidence lot expansion is still bounded by `NormalizeLot()` and broker symbol limits to avoid invalid volume errors.
+
 # FUTURE MODULES
 
 News Filter
